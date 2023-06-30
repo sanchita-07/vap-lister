@@ -1,12 +1,12 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
+	"strings"
 
-	"github.com/containerd/containerd/diff/apply"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	// "github.com/containerd/containerd/diff/apply"
+
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -114,13 +114,22 @@ func main() {
 		fmt.Printf("- %s\n", pod.Name)
 	}
 
+	// var policyy v1alpha1.ValidatingAdmissionPolicy
 	<-stopCh
 	for _, policy := range vaplist {
 		// Apply the ValidatingAdmissionPolicy to the Pod
 		for _, pod := range podlist {
 			// ...
-			// applyConfig :=
-			_, err := clientset.AdmissionregistrationV1alpha1().ValidatingAdmissionPolicies().Apply(context.TODO(), applyConfig, metav1.ApplyOptions{})
+			policyDecisions := applyPolicyToResource(policy, pod)
+			for _, decision := range policyDecisions {
+				if strings.Compare(string(decision.Action), "deny") == 0 {
+					fmt.Println(decision.Message)
+				} else {
+					fmt.Println(decision.Action)
+				}
+			}
+
+			// _, err := clientset.AdmissionregistrationV1alpha1().ValidatingAdmissionPolicies().Apply(context.TODO(), applyConfig, metav1.ApplyOptions{})
 			if err != nil {
 				fmt.Printf("Failed to apply ValidatingAdmissionPolicy %s to Pod %s: %v\n", policy.Name, pod.Name, err)
 			} else {
