@@ -26,10 +26,8 @@ type ApplyCommandConfig struct {
 }
 
 var (
-	applyHelp = `
-To apply a policy on a resource:
-		cobra-cli apply /path/to/policy.yaml /path/to/resource.yaml
-`
+	applyHelp = `To apply a policy on a resource:
+		cobra-cli apply /path/to/policy.yaml /path/to/resource.yaml`
 )
 
 func ApplyCommand() *cobra.Command {
