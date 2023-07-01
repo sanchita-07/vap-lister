@@ -1,13 +1,23 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"strings"
 
-	// "github.com/containerd/containerd/diff/apply"
-
+	v1 "k8s.io/api/admissionregistration/v1"
+	"k8s.io/api/admissionregistration/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apiserver/pkg/admission"
+	"k8s.io/apiserver/pkg/admission/plugin/cel"
+	"k8s.io/apiserver/pkg/admission/plugin/validatingadmissionpolicy"
+	"k8s.io/apiserver/pkg/admission/plugin/webhook/matchconditions"
+	celconfig "k8s.io/apiserver/pkg/apis/cel"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -114,22 +124,26 @@ func main() {
 		fmt.Printf("- %s\n", pod.Name)
 	}
 
-	// var policyy v1alpha1.ValidatingAdmissionPolicy
 	<-stopCh
 	for _, policy := range vaplist {
 		// Apply the ValidatingAdmissionPolicy to the Pod
 		for _, pod := range podlist {
 			// ...
-			policyDecisions := applyPolicyToResource(policy, pod)
+			podun, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&pod)
+			policyDecisions := applyPolicyToResource(policy, &unstructured.Unstructured{Object: podun})
+			denied := false
 			for _, decision := range policyDecisions {
 				if strings.Compare(string(decision.Action), "deny") == 0 {
+					denied = true
 					fmt.Println(decision.Message)
+					break
 				} else {
 					fmt.Println(decision.Action)
 				}
 			}
-
-			// _, err := clientset.AdmissionregistrationV1alpha1().ValidatingAdmissionPolicies().Apply(context.TODO(), applyConfig, metav1.ApplyOptions{})
+			if !denied {
+				fmt.Printf("Failed to apply ValidatingAdmissionPolicy %s to Pod %s: %v\n", policy.Name, pod.Name, err)
+			}
 			if err != nil {
 				fmt.Printf("Failed to apply ValidatingAdmissionPolicy %s to Pod %s: %v\n", policy.Name, pod.Name, err)
 			} else {
@@ -137,4 +151,86 @@ func main() {
 			}
 		}
 	}
+}
+
+func applyPolicyToResource(policy *v1alpha1.ValidatingAdmissionPolicy, resource *unstructured.Unstructured) []validatingadmissionpolicy.PolicyDecision {
+	forbiddenReason := metav1.StatusReasonForbidden
+	matchPolicyType := v1alpha1.Exact
+
+	var validations []v1alpha1.Validation = policy.Spec.Validations
+	var expressions, messageExpressions []cel.ExpressionAccessor
+
+	for _, expression := range validations {
+		message := fmt.Sprintf("error: failed to create %s: %s \"%s\" is forbidden: ValidatingAdmissionPolicy '%s' denied request: failed expression: %s", resource.GetKind(), resource.GetAPIVersion(), resource.GetName(), policy.Name, expression.Expression)
+		condition := &validatingadmissionpolicy.ValidationCondition{
+			Expression: expression.Expression,
+			Message:    message,
+			Reason:     &forbiddenReason,
+		}
+
+		messageCondition := &validatingadmissionpolicy.MessageExpressionCondition{
+			MessageExpression: expression.MessageExpression,
+		}
+
+		expressions = append(expressions, condition)
+		messageExpressions = append(messageExpressions, messageCondition)
+	}
+
+	filterCompiler := cel.NewFilterCompiler()
+	filter := filterCompiler.Compile(expressions, cel.OptionalVariableDeclarations{HasParams: false, HasAuthorizer: false}, celconfig.PerCallLimit)
+
+	compileErrors := filter.CompilationErrors()
+
+	if len(compileErrors) > 0 {
+		for _, err := range compileErrors {
+			fmt.Println(err.Error())
+		}
+		return nil
+	}
+
+	messageExpressionCompiler := cel.NewFilterCompiler()
+	messageExpressionfilter := messageExpressionCompiler.Compile(messageExpressions, cel.OptionalVariableDeclarations{HasParams: false, HasAuthorizer: false}, celconfig.PerCallLimit)
+
+	admissionAttributes := admission.NewAttributesRecord(resource.DeepCopyObject(), nil, resource.GroupVersionKind(), resource.GetNamespace(), resource.GetName(), schema.GroupVersionResource{}, "", admission.Create, nil, false, nil)
+	versionedAttr, _ := admission.NewVersionedAttributes(admissionAttributes, admissionAttributes.GetKind(), nil)
+
+	ctx := context.TODO()
+	failPolicy := v1.FailurePolicyType(*policy.Spec.FailurePolicy)
+
+	matchConditions := policy.Spec.MatchConditions
+	var matchExpressions []cel.ExpressionAccessor
+
+	for _, expression := range matchConditions {
+		condition := &matchconditions.MatchCondition{
+			Name:       expression.Name,
+			Expression: expression.Expression,
+		}
+		matchExpressions = append(matchExpressions, condition)
+	}
+
+	matchFilterCompiler := cel.NewFilterCompiler()
+	matchFilter := matchFilterCompiler.Compile(matchExpressions, cel.OptionalVariableDeclarations{HasParams: false, HasAuthorizer: false}, celconfig.PerCallLimit)
+
+	newMatcher := matchconditions.NewMatcher(matchFilter, nil, &failPolicy, string(matchPolicyType), "test")
+
+	auditAnnotations := policy.Spec.AuditAnnotations
+	var auditExpressions []cel.ExpressionAccessor
+
+	for _, expression := range auditAnnotations {
+		condition := &validatingadmissionpolicy.AuditAnnotationCondition{
+			Key:             expression.Key,
+			ValueExpression: expression.ValueExpression,
+		}
+		auditExpressions = append(auditExpressions, condition)
+	}
+
+	auditAnnotationFilterCompiler := cel.NewFilterCompiler()
+	auditAnnotationFilter := auditAnnotationFilterCompiler.Compile(auditExpressions, cel.OptionalVariableDeclarations{HasParams: false, HasAuthorizer: false}, celconfig.PerCallLimit)
+
+	validator := validatingadmissionpolicy.NewValidator(filter, newMatcher, auditAnnotationFilter, messageExpressionfilter, &failPolicy, nil)
+	validateResult := validator.Validate(ctx, versionedAttr, nil, celconfig.RuntimeCELCostBudget)
+
+	//fmt.Println(validateResult.AuditAnnotations[0].Action)
+
+	return validateResult.Decisions
 }
