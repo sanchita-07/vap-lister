@@ -68,17 +68,20 @@ func main() {
 	podLister := kubeInformer.Core().V1().Pods().Lister()
 	podInformer := kubeInformer.Core().V1().Pods().Informer()
 
+	deploymentLister := kubeInformer.Apps().V1().Deployments().Lister()
+	deploymentInformer := kubeInformer.Apps().V1().Deployments().Informer()
+	
 	//Start the informer
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
 	go vapInformer.Run(stopCh)
 	go podInformer.Run(stopCh)
-
+	go deploymentInformer.Run(stopCh)
 	// kubeInformer.Start(stopCh)
 
 	// Wait for the caches to sync
-	if !cache.WaitForCacheSync(stopCh, podInformer.HasSynced, vapInformer.HasSynced) {
+	if !cache.WaitForCacheSync(stopCh, podInformer.HasSynced, vapInformer.HasSynced, deploymentInformer.HasSynced) {
 		fmt.Println("Failed to sync caches")
 		return
 	}
@@ -124,13 +127,54 @@ func main() {
 		fmt.Printf("- %s\n", pod.Name)
 	}
 
+	// Get the list of Deployments
+	deploymentlist, err := deploymentLister.List(labels.Everything())
+	if err != nil {
+		fmt.Printf("Failed to list Deployments: %v\n", err)
+		return
+	}
+
+	// Print the deployments
+	fmt.Println("Deployments:")
+	for _, deployment := range deploymentlist {
+		fmt.Printf("- %s\n", deployment.Name)
+	}
+
 	<-stopCh
+	// for _, policy := range vaplist {
+	// 	// Apply the ValidatingAdmissionPolicy to the Pod
+	// 	for _, pod := range podlist {
+	// 		// ...
+	// 		podun, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&pod)
+	// 		policyDecisions := applyPolicyToResource(policy, &unstructured.Unstructured{Object: podun})
+	// 		denied := false
+	// 		for _, decision := range policyDecisions {
+	// 			if strings.Compare(string(decision.Action), "deny") == 0 {
+	// 				denied = true
+	// 				fmt.Println(decision.Message)
+	// 				break
+	// 			} else {
+	// 				fmt.Println(decision.Action)
+	// 			}
+	// 		}
+	// 		if !denied {
+	// 			fmt.Printf("Failed to apply ValidatingAdmissionPolicy %s to Pod %s: %v\n", policy.Name, pod.Name, err)
+	// 		}
+	// 		if err != nil {
+	// 			fmt.Printf("Failed to apply ValidatingAdmissionPolicy %s to Pod %s: %v\n", policy.Name, pod.Name, err)
+	// 		} else {
+	// 			fmt.Printf("Applied ValidatingAdmissionPolicy %s to Pod %s\n", policy.Name, pod.Name)
+	// 		}
+	// 	}
+	// }
+
+
 	for _, policy := range vaplist {
 		// Apply the ValidatingAdmissionPolicy to the Pod
-		for _, pod := range podlist {
+		for _, deployment := range deploymentlist {
 			// ...
-			podun, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&pod)
-			policyDecisions := applyPolicyToResource(policy, &unstructured.Unstructured{Object: podun})
+			deploymentun, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&deployment)
+			policyDecisions := applyPolicyToResource(policy, &unstructured.Unstructured{Object: deploymentun})
 			denied := false
 			for _, decision := range policyDecisions {
 				if strings.Compare(string(decision.Action), "deny") == 0 {
@@ -142,12 +186,12 @@ func main() {
 				}
 			}
 			if !denied {
-				fmt.Printf("Failed to apply ValidatingAdmissionPolicy %s to Pod %s: %v\n", policy.Name, pod.Name, err)
+				fmt.Printf("Failed to apply ValidatingAdmissionPolicy %s to Pod %s: %v\n", policy.Name, deployment.Name, err)
 			}
 			if err != nil {
-				fmt.Printf("Failed to apply ValidatingAdmissionPolicy %s to Pod %s: %v\n", policy.Name, pod.Name, err)
+				fmt.Printf("Failed to apply ValidatingAdmissionPolicy %s to Pod %s: %v\n", policy.Name, deployment.Name, err)
 			} else {
-				fmt.Printf("Applied ValidatingAdmissionPolicy %s to Pod %s\n", policy.Name, pod.Name)
+				fmt.Printf("Applied ValidatingAdmissionPolicy %s to Pod %s\n", policy.Name, deployment.Name)
 			}
 		}
 	}
